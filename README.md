@@ -1,4 +1,6 @@
-Note : currently only arm64 architecture is supported
+Note : 
+- currently only arm64 architecture is supported
+- ideal android ndk version  :  26.1.10909125
 
 
 
