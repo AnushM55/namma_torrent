@@ -9,6 +9,7 @@ import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'torrent_ffi.dart';
 
 void main() {
@@ -84,727 +85,278 @@ class TorrentFile {
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({Key? key}) : super(key: key);
 
   @override
-  State<HomePage> createState() => _HomePageState();
+  _HomePageState createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
   final TextEditingController _magnetController = TextEditingController();
-  String _status = 'Not initialized';
-  bool _isLoading = false;
-  bool _isInitialized = false;
-  
-  String _torrentHash = '';
-  List<TorrentFile> _files = [];
-  TorrentFile? _selectedFile;
-  String _localFilePath = '';
-  double _downloadProgress = 0.0;
-  bool _isDownloading = false;
-  bool _downloadComplete = false;
-  Timer? _progressTimer;
-  
-  String? _downloadDirectory;
-
+  String _statusMessage = "Enter a magnet link to begin";
+  String? _torrentHash;
+  List<dynamic> _filesList = [];
+  String? _selectedFilePath;
+  String? _selectedFileIndex;
   VideoPlayerController? _videoController;
   ChewieController? _chewieController;
+  bool _isInitialized = false;
+  bool _isDownloading = false;
+  bool _isStreaming = false;
+  double _downloadProgress = 0.0;
+  Timer? _progressTimer;
+  String? _streamUrl;
 
   @override
   void initState() {
     super.initState();
-    _requestPermissionsAndInit();
-  }
-
-  // Request permissions and initialize
-  Future<void> _requestPermissionsAndInit() async {
-    setState(() {
-      _status = 'Requesting permissions...';
-      _isLoading = true;
-    });
-    
-    // Request all files access permission
-    if (Platform.isAndroid) {
-      // Check if we already have permissions
-      if (!await Permission.manageExternalStorage.isGranted) {
-        // Show explanation dialog
-        if (mounted) {
-          await showDialog(
-            context: context,
-            barrierDismissible: false,
-            builder: (BuildContext context) {
-              return AlertDialog(
-                title: const Text('Storage Permission Required'),
-                content: const SingleChildScrollView(
-                  child: ListBody(
-                    children: [
-                      Text('This app needs full storage access to:'),
-                      SizedBox(height: 8),
-                      Text('• Download torrent files to your device'),
-                      Text('• Save files to your selected location'),
-                      Text('• Read and play downloaded media files'),
-                      SizedBox(height: 12),
-                      Text('You will need to enable "Allow management of all files" in the next screen.'),
-                    ],
-                  ),
-                ),
-                actions: [
-                  TextButton(
-                    child: const Text('OPEN SETTINGS'),
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      openAppSettings();
-                    },
-                  ),
-                ],
-              );
-            },
-          );
-        }
-        
-        // Request the permission
-        await Permission.manageExternalStorage.request();
-      }
-    }
-    
-    // Load saved directory and initialize
-    await _loadSavedDirectory();
-  }
-  
-  // Load saved directory
-  Future<void> _loadSavedDirectory() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _downloadDirectory = prefs.getString('downloadDirectory');
-    });
-    
-    // Get default download directory if none is set
-    if (_downloadDirectory == null) {
-      await _selectDefaultDownloadDirectory();
-    } else {
-      // Verify the directory still exists
-      final dir = Directory(_downloadDirectory!);
-      if (!await dir.exists()) {
-        await _selectDefaultDownloadDirectory();
-      } else {
-        _initializeFFI();
-      }
-    }
-  }
-  
-  // Select default download directory
-  Future<void> _selectDefaultDownloadDirectory() async {
-    try {
-      // Get the Downloads directory
-      Directory? downloadsDir;
-      
-      if (Platform.isAndroid) {
-        // Try to use the standard Downloads directory
-        downloadsDir = Directory('/storage/emulated/0/Download');
-        if (!await downloadsDir.exists()) {
-          // Fall back to Documents
-          downloadsDir = Directory('/storage/emulated/0/Documents');
-        }
-        if (!await downloadsDir.exists()) {
-          // Final fallback to app's external storage
-          downloadsDir = await getExternalStorageDirectory();
-        }
-      } else {
-        // On iOS, use the documents directory
-        final appDir = await getApplicationDocumentsDirectory();
-        downloadsDir = Directory('${appDir.path}/Downloads');
-        await downloadsDir.create(recursive: true);
-      }
-      
-      if (downloadsDir != null) {
-        await _saveDownloadDirectory(downloadsDir.path);
-        _initializeFFI();
-      } else {
-        setState(() {
-          _status = 'Error: Could not find a valid download directory';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _status = 'Error finding download directory: $e';
-        _isLoading = false;
-      });
-    }
-  }
-  
-  // Select a custom download directory
-  Future<void> _selectDownloadDirectory() async {
-    try {
-      setState(() {
-        _status = 'Please select a folder...';
-        _isLoading = true;
-      });
-      
-      // Use FilePicker to select a directory
-      String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
-      
-      if (selectedDirectory != null) {
-        await _saveDownloadDirectory(selectedDirectory);
-        
-        // Shutdown existing torrent client
-        if (_isInitialized) {
-          TorrentFFI.shutdown();
-          _isInitialized = false;
-        }
-        
-        // Re-initialize with new directory
-        await _initializeFFI();
-      } else {
-        setState(() {
-          _status = 'Directory selection canceled';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _status = 'Error selecting directory: $e';
-        _isLoading = false;
-      });
-    }
-  }
-
-  // Initialize FFI with simplified error handling
-  Future<void> _initializeFFI() async {
-    setState(() {
-      _status = 'Initializing...';
-      _isLoading = true;
-    });
-
-    try {
-      final result = await TorrentFFI.initialize(
-        customDownloadDirectory: _downloadDirectory,
-      );
-
-      print('FFI initialization result: $result');
-
-      setState(() {
-        _status = result;
-        _isLoading = false;
-        _isInitialized = result.contains('successfully');
-      });
-    } catch (e) {
-      setState(() {
-        _status = 'Error initializing torrent client: $e';
-        _isLoading = false;
-        _isInitialized = false;
-      });
-    }
-  }
-
-  // Save the download directory
-  Future<void> _saveDownloadDirectory(String directory) async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    await prefs.setString('downloadDirectory', directory);
-    setState(() {
-      _downloadDirectory = directory;
-    });
+    _initializeTorrentClient();
   }
 
   @override
   void dispose() {
-    _magnetController.dispose();
-    _disposeVideoControllers();
-    _stopProgressTracking();
-    if (_isInitialized) {
-      TorrentFFI.shutdown();
-    }
+    _videoController?.dispose();
+    _chewieController?.dispose();
+    _progressTimer?.cancel();
+    TorrentFFI.shutdown();
     super.dispose();
   }
 
-  void _disposeVideoControllers() {
-    _chewieController?.dispose();
-    _videoController?.dispose();
-    _chewieController = null;
-    _videoController = null;
+  Future<void> _initializeTorrentClient() async {
+    // Request storage permission
+    await _requestPermissions();
+
+    // Initialize the torrent client
+    final result = await TorrentFFI.initialize();
+    setState(() {
+      _statusMessage = "Torrent client initialized: $result";
+      _isInitialized = true;
+    });
   }
 
-  // Process a magnet link
-  void _processMagnetLink() {
-    if (_magnetController.text.isEmpty) {
+  Future<void> _requestPermissions() async {
+    final deviceInfo = DeviceInfoPlugin();
+    if (await Permission.storage.request().isGranted) {
+      print("Storage permission granted");
+    }
+
+    // For Android 13 and above, request media permissions
+    final androidInfo = await deviceInfo.androidInfo;
+    if (androidInfo.version.sdkInt >= 33) {
+      await Permission.photos.request();
+      await Permission.videos.request();
+      await Permission.audio.request();
+    }
+  }
+
+  Future<void> _processMagnetLink() async {
+    final magnetLink = _magnetController.text.trim();
+    if (magnetLink.isEmpty) {
       setState(() {
-        _status = 'Please enter a magnet link';
+        _statusMessage = "Please enter a magnet link";
       });
       return;
     }
 
     setState(() {
-      _status = 'Adding torrent & getting info...';
-      _isLoading = true;
-      _files = [];
-      _selectedFile = null;
-      _localFilePath = '';
+      _statusMessage = "Processing magnet link...";
+      _filesList = [];
+      _torrentHash = null;
+      _selectedFilePath = null;
+      _selectedFileIndex = null;
       _downloadProgress = 0.0;
-      _downloadComplete = false;
       _isDownloading = false;
-      _torrentHash = '';
-      _disposeVideoControllers();
-      _stopProgressTracking();
+      _isStreaming = false;
+      _streamUrl = null;
     });
 
-    try {
-      // Call the new function to get the hash directly
-      final result = TorrentFFI.addTorrentAndGetInfoHash(_magnetController.text);
-      
-      // Check for errors returned from Go
-      if (result.startsWith('Error:')) {
-        setState(() {
-          _status = result;
-          _isLoading = false;
-        });
-        return;
-      }
-      
-      // Store the hash
+    final result = await TorrentFFI.addTorrentAndGetInfoHash(magnetLink);
+    if (result.startsWith("Error")) {
+      setState(() {
+        _statusMessage = result;
+      });
+      return;
+    }
+
+    setState(() {
       _torrentHash = result;
-      
-      setState(() {
-        _status = 'Fetching file list for hash: $_torrentHash';
-      });
-      
-      if (_torrentHash.isNotEmpty) {
-        _fetchFileList();
-      } else {
-        // Should not happen if Go returns empty string only on non-error
-        setState(() {
-          _status = 'Error: Did not receive torrent hash';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _status = 'Error processing magnet: $e';
-        _isLoading = false;
-      });
-    }
-  }
-  
-  // Fetch the list of files in the torrent
-  void _fetchFileList() {
-    try {
-      final jsonString = TorrentFFI.listTorrentFiles(_torrentHash);
-      final dynamic jsonData = json.decode(jsonString);
-      
-      if (jsonData is List) {
-        final files = jsonData.map((item) => TorrentFile.fromJson(item)).toList();
-        
-        setState(() {
-          _files = files;
-          _status = 'Found ${_files.length} files. Select a file to download.';
-          _isLoading = false;
-        });
-      } else if (jsonData is String && jsonData.startsWith('Error:')) {
-        setState(() {
-          _status = jsonData; // Show error from Go
-          _isLoading = false;
-        });
-      } else {
-        setState(() {
-          _status = 'Error: Unexpected file list format';
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _status = 'Error fetching file list: $e';
-        _isLoading = false;
-      });
-    }
-  }
-  
-  // Select a file
-  void _selectFile(TorrentFile file) {
-    setState(() {
-      _selectedFile = file;
-      _status = 'Ready to download: ${file.name}';
-      _localFilePath = '';
-      _downloadProgress = 0.0;
-      _downloadComplete = false;
-      _isDownloading = false;
-      _disposeVideoControllers();
-      _stopProgressTracking();
+      _statusMessage = "Torrent added. Fetching file list...";
     });
+
+    _fetchFileList();
   }
-  
-  void _stopProgressTracking() {
-    _progressTimer?.cancel();
-    _progressTimer = null;
+
+  Future<void> _fetchFileList() async {
+    if (_torrentHash == null) {
+      setState(() {
+        _statusMessage = "Error: No torrent hash available";
+      });
+      return;
+    }
+
+    final result = await TorrentFFI.listTorrentFiles(_torrentHash!);
+    if (result.startsWith("Error")) {
+      setState(() {
+        _statusMessage = result;
+      });
+      return;
+    }
+
+    try {
+      final files = jsonDecode(result);
+      setState(() {
+        _filesList = files;
+        _statusMessage = "Found ${_filesList.length} files. Select one to stream or download.";
+      });
+    } catch (e) {
+      setState(() {
+        _statusMessage = "Error parsing file list: $e";
+      });
+    }
   }
-  
-  // Start downloading the selected file
-  void _downloadSelectedFile() {
-    if (_selectedFile == null) return;
-    
+
+  Future<void> _selectFileToDownload(int index) async {
+    final fileIndex = _filesList[index]['index'].toString();
     setState(() {
-      _isLoading = true;
+      _selectedFileIndex = fileIndex;
+      _statusMessage = "Downloading file: ${_filesList[index]['name']}";
       _isDownloading = true;
+      _isStreaming = false;
       _downloadProgress = 0.0;
-      _downloadComplete = false;
-      _status = 'Starting download for: ${_selectedFile!.name}';
     });
-    
-    try {
-      final result = TorrentFFI.downloadTorrentFile(_torrentHash, _selectedFile!.index.toString());
-      
-      // Check if the result looks like an error message
-      if (result.startsWith('Error:')) {
-        setState(() {
-          _status = result;
-          _isLoading = false;
-          _isDownloading = false;
-        });
-        return;
-      }
-      
-      // Store the local file path
-      _localFilePath = result;
-      
-      // Start tracking download progress
-      _trackDownloadProgress();
-      
-    } catch (e) {
+
+    // Start downloading the file
+    final result = await TorrentFFI.downloadTorrentFile(_torrentHash!, fileIndex);
+    if (result.startsWith("Error")) {
       setState(() {
-        _status = 'Error starting download: $e';
-        _isLoading = false;
+        _statusMessage = result;
         _isDownloading = false;
       });
+      return;
     }
+
+    setState(() {
+      _selectedFilePath = result;
+    });
+
+    // Start tracking download progress
+    _startProgressTracking();
   }
-  
-  // Track the download progress
-  void _trackDownloadProgress() {
-    // Cancel any existing timer
-    _stopProgressTracking();
+
+  Future<void> _selectFileToStream(int index) async {
+    final fileIndex = _filesList[index]['index'].toString();
+    setState(() {
+      _selectedFileIndex = fileIndex;
+      _statusMessage = "Preparing to stream: ${_filesList[index]['name']}";
+      _isDownloading = false;
+      _isStreaming = true;
+      _downloadProgress = 0.0;
+    });
+
+    // Get the stream URL
+    final result = await TorrentFFI.getStreamURL(_torrentHash!, fileIndex);
+    if (result.startsWith("Error")) {
+      setState(() {
+        _statusMessage = result;
+        _isStreaming = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _streamUrl = result;
+      _statusMessage = "Stream ready. Starting player...";
+    });
+
+    // Start the video player with the stream URL
+    _initializePlayer(_streamUrl!, true);
     
-    // Create a new timer to poll for progress
-    _progressTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_selectedFile == null) {
-        _stopProgressTracking();
+    // Start tracking download progress in the background
+    _startProgressTracking();
+  }
+
+  void _startProgressTracking() {
+    // Cancel any existing timer
+    _progressTimer?.cancel();
+
+    // Start a new timer to update progress
+    _progressTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (_torrentHash == null || _selectedFileIndex == null) {
+        timer.cancel();
         return;
       }
+
+      final progressResult = await TorrentFFI.getDownloadProgress(
+          _torrentHash!, _selectedFileIndex!);
+      
+      if (progressResult.startsWith("Error")) {
+        print("Error tracking progress: $progressResult");
+        return;
+      }
+
       try {
-        final progressJson = TorrentFFI.getDownloadProgress(_torrentHash, _selectedFile!.index.toString());
-        final progressData = json.decode(progressJson);
+        final progress = jsonDecode(progressResult);
+        final double progressValue = double.parse(progress["Progress"].toString());
         
-        // Check for errors from Go
-        if (progressData is String && progressData.startsWith('Error:')) {
-          setState(() {
-            _status = progressData;
-            _isDownloading = false; // Stop showing progress bar on error
-            _isLoading = false;
-          });
-          _stopProgressTracking();
-          return;
+        setState(() {
+          _downloadProgress = progressValue;
+          
+          // If download is complete and we have a file path, initialize the player
+          if (_downloadProgress >= 1.0 && 
+              _selectedFilePath != null && 
+              _isDownloading &&
+              _videoController == null) {
+            _initializePlayer(_selectedFilePath!, false);
+            _statusMessage = "Download complete. Playing file...";
+          }
+        });
+        
+        // Stop the timer if the download is complete
+        if (_downloadProgress >= 1.0 && !_isStreaming) {
+          timer.cancel();
         }
-        
-        // Check if the response is a map (expected)
-        if (progressData is Map<String, dynamic>) {
-          setState(() {
-            _downloadProgress = (progressData['progress'] as num).toDouble(); 
-            _status = 'Downloading: ${_downloadProgress.toStringAsFixed(2)}% (${_formatBytes(progressData['completed'] as int)}/${_formatBytes(progressData['total'] as int)})';
-            
-            if (progressData['done'] as bool) {
-              _downloadComplete = true;
-              _isDownloading = false;
-              _isLoading = false;
-              _status = 'Download complete: ${_selectedFile!.name}';
-              _stopProgressTracking();
-            }
-          });
-        } else {
-           throw Exception('Unexpected progress format: $progressData');
-        }
-        
       } catch (e) {
-        print('Error tracking progress: $e');
-        // Optionally update status to show tracking error
-         setState(() {
-           _status = 'Error checking progress: $e';
-           _isDownloading = false; // Stop showing progress bar
-         });
-         _stopProgressTracking(); 
+        print("Error parsing progress: $e");
       }
     });
   }
-  
-  String _formatBytes(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(2)} KB';
-    if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
-  }
-  
-  // Play the downloaded file with better error handling
-  Future<void> _playLocalFile() async {
-    if (_localFilePath.isEmpty || !_downloadComplete) return;
-    
-    setState(() {
-      _isLoading = true;
-      _status = 'Loading video from local file...';
-    });
-    
+
+  Future<void> _initializePlayer(String source, bool isStream) async {
+    // Dispose of any existing controllers
+    _videoController?.dispose();
+    _chewieController?.dispose();
+
     try {
-      _disposeVideoControllers();
-      
-      // Print detailed debugging info
-      print("Attempting to play file: $_localFilePath");
-      
-      // Check if file exists
-      File fileToPlay = File(_localFilePath);
-      bool fileExists = await fileToPlay.exists();
-      
-      if (!fileExists) {
-        print("File not found at original path: $_localFilePath");
-        
-        // First try common alternates - the file might be in a subdirectory
-        final fileName = path.basename(_localFilePath);
-        final parentDir = Directory(path.dirname(_localFilePath));
-        
-        // List of places to look for the file
-        List<String> possiblePaths = [];
-        
-        // Look for common structures
-        if (await parentDir.exists()) {
-          // Try looking in subdirectories with the same name as the file (without extension)
-          final fileNameWithoutExt = fileName.contains('.') 
-              ? fileName.substring(0, fileName.lastIndexOf('.')) 
-              : fileName;
-          
-          final subDir = Directory(path.join(parentDir.path, fileNameWithoutExt));
-          if (await subDir.exists()) {
-            possiblePaths.add(path.join(subDir.path, fileName));
-          }
-          
-          // Also try looking for the file directly in subdirectories
-          try {
-            await for (final entity in parentDir.list(recursive: true)) {
-              if (entity is File && path.basename(entity.path) == fileName) {
-                possiblePaths.add(entity.path);
-                break;
-              }
-            }
-          } catch (e) {
-            print("Error searching subdirectories: $e");
-          }
-        }
-        
-        // Check if any of the possible paths exist
-        for (final possiblePath in possiblePaths) {
-          print("Checking alternative path: $possiblePath");
-          final possibleFile = File(possiblePath);
-          if (await possibleFile.exists()) {
-            print("Found file at: $possiblePath");
-            fileToPlay = possibleFile;
-            fileExists = true;
-            
-            // Update the stored path for future reference
-            _localFilePath = possiblePath;
-            break;
-          }
-        }
-        
-        // If still not found, try the more exhaustive directory search
-        if (!fileExists) {
-          try {
-            // Try to handle case-sensitivity and path normalization issues
-            final directory = Directory(path.dirname(_localFilePath));
-            
-            if (!await directory.exists()) {
-              print("Parent directory doesn't exist: ${directory.path}");
-              throw Exception('Directory not found: ${directory.path}');
-            }
-            
-            print("Searching directory and subdirectories: ${directory.path}");
-            
-            bool fileFound = false;
-            String? foundPath;
-            
-            // Deeper recursive search
-            try {
-              await for (final entity in directory.list(recursive: true)) {
-                if (entity is File) {
-                  final entityName = path.basename(entity.path);
-                  print("Checking file: $entityName");
-                  
-                  if (entityName.toLowerCase() == fileName.toLowerCase()) {
-                    foundPath = entity.path;
-                    print("Found matching file: $foundPath");
-                    fileFound = true;
-                    break;
-                  }
-                }
-              }
-              
-              if (!fileFound) {
-                // Try one level up
-                final parentOfParent = Directory(path.dirname(directory.path));
-                if (await parentOfParent.exists()) {
-                  await for (final entity in parentOfParent.list(recursive: true)) {
-                    if (entity is File) {
-                      final entityName = path.basename(entity.path);
-                      if (entityName.toLowerCase() == fileName.toLowerCase()) {
-                        foundPath = entity.path;
-                        print("Found matching file in parent directory: $foundPath");
-                        fileFound = true;
-                        break;
-                      }
-                    }
-                  }
-                }
-              }
-              
-              if (!fileFound) {
-                throw Exception('File not found at $_localFilePath and no similar files found');
-              }
-            } catch (e) {
-              print("Error while searching directory: $e");
-              throw Exception('File not found and error searching directory: $e');
-            }
-            
-            // Update file with found path
-            if (foundPath != null) {
-              fileToPlay = File(foundPath);
-              fileExists = await fileToPlay.exists();
-              if (!fileExists) {
-                throw Exception('File found but then disappeared at: $foundPath');
-              }
-              // Update the stored path for future reference
-              _localFilePath = foundPath;
-            }
-          } catch (e) {
-            print("Error in fallback file search: $e");
-            throw Exception('Unable to locate file: $e');
-          }
-        }
+      if (isStream) {
+        // For streaming, use network source
+        _videoController = VideoPlayerController.network(source);
+      } else {
+        // For local file, use file source
+        _videoController = VideoPlayerController.file(File(source));
       }
-      
-      // Check file size to ensure it's a valid file
-      final fileSize = await fileToPlay.length();
-      print("File exists: $fileExists, Size: $fileSize bytes");
-      
-      if (fileSize == 0) {
-        throw Exception('File exists but is empty (0 bytes)');
-      }
-      
-      // Create the video controller with explicit file path
-      _videoController = VideoPlayerController.file(fileToPlay);
-      
-      // Initialize with timeout and error handling
-      bool initialized = false;
-      try {
-        await _videoController!.initialize().timeout(
-          const Duration(seconds: 15),
-          onTimeout: () {
-            throw Exception('Video initialization timed out after 15 seconds');
-          },
-        );
-        initialized = true;
-      } catch (e) {
-        print("Error initializing video controller: $e");
-        throw Exception('Failed to initialize video: $e');
-      }
-      
-      if (!initialized) {
-        throw Exception('Video failed to initialize');
-      }
-      
-      print("Video controller initialized successfully");
-      print("Video dimensions: ${_videoController!.value.size}");
-      print("Video duration: ${_videoController!.value.duration}");
+
+      await _videoController!.initialize();
       
       _chewieController = ChewieController(
         videoPlayerController: _videoController!,
         autoPlay: true,
         looping: false,
-        allowMuting: true,
-        allowPlaybackSpeedChanging: true,
-        showControls: true,
-        aspectRatio: _videoController!.value.aspectRatio != 0 ? 
-            _videoController!.value.aspectRatio : 16/9,
+        aspectRatio: _videoController!.value.aspectRatio,
         errorBuilder: (context, errorMessage) {
-          print("Chewie error: $errorMessage");
           return Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Error: $errorMessage',
-                  style: const TextStyle(color: Colors.white),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: _playLocalFile,
-                  child: const Text('Retry'),
-                ),
-              ],
+            child: Text(
+              'Error: $errorMessage',
+              style: const TextStyle(color: Colors.white),
             ),
           );
         },
       );
       
-      setState(() {
-        _isLoading = false;
-        _status = 'Playing: ${_selectedFile?.name}';
-      });
+      setState(() {});
     } catch (e) {
-      print("Error playing local file: $e");
       setState(() {
-        _status = 'Error playing local file: $e';
-        _isLoading = false;
-        _disposeVideoControllers();
+        _statusMessage = "Error initializing player: $e";
       });
-      
-      // Display a dialog with detailed error and options to help troubleshoot
-      if (mounted) {
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('File Access Error'),
-            content: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text('Unable to access the file: $_localFilePath'),
-                  const SizedBox(height: 8),
-                  Text('Error: $e'),
-                  const SizedBox(height: 16),
-                  const Text('Troubleshooting steps:', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  const Text('• Check if the download completed successfully'),
-                  const Text('• Try downloading the file again'),
-                  const Text('• Check your device settings for media permissions'),
-                  if (_downloadDirectory != null) ...[
-                    const SizedBox(height: 16),
-                    Text('Current download directory: $_downloadDirectory'),
-                  ],
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('CLOSE'),
-              ),
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).pop();
-                  if (_selectedFile != null) {
-                    _downloadSelectedFile();
-                  }
-                },
-                child: const Text('REDOWNLOAD'),
-              ),
-            ],
-          ),
-        );
-      }
     }
   }
 
@@ -812,147 +364,111 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        title: const Text('Torrent Streamer'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.folder),
-            tooltip: 'Change Download Folder',
-            onPressed: _isLoading ? null : _selectDownloadDirectory,
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Permissions',
-            onPressed: () => openAppSettings(),
-          ),
-        ],
+        title: Text(_isStreaming ? "Torrent Streamer" : "Torrent Downloader"),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Display current download directory
-            if (_downloadDirectory != null)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8.0),
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(8.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Download Directory:',
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                        Text(
-                          _downloadDirectory!,
-                          style: Theme.of(context).textTheme.bodyMedium,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
             TextField(
               controller: _magnetController,
               decoration: const InputDecoration(
-                labelText: 'Magnet Link',
-                hintText: 'Paste magnet link here',
+                labelText: 'Enter Magnet Link',
                 border: OutlineInputBorder(),
               ),
               maxLines: 2,
             ),
             const SizedBox(height: 16),
             ElevatedButton(
-              onPressed: _isLoading || !_isInitialized ? null : _processMagnetLink,
-              child: const Text('Process Torrent'),
+              onPressed: _isInitialized ? _processMagnetLink : null,
+              child: const Text('Process Magnet Link'),
             ),
             const SizedBox(height: 16),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Text(
-                  _status,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ),
+            Text(
+              _statusMessage,
+              style: const TextStyle(fontSize: 16),
+              textAlign: TextAlign.center,
             ),
-            if (_isDownloading && !_downloadComplete) ...[
-              const SizedBox(height: 8),
-              LinearProgressIndicator(
-                value: _downloadProgress / 100,
-                backgroundColor: Colors.grey[300],
-                valueColor: AlwaysStoppedAnimation<Color>(Theme.of(context).colorScheme.primary),
-              ),
-              const SizedBox(height: 8),
-              Text('${_downloadProgress.toStringAsFixed(2)}%', 
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ],
             const SizedBox(height: 16),
-            if (_isLoading && _chewieController == null && !_isDownloading)
-              const Center(child: CircularProgressIndicator())
-            else if (_chewieController != null)
-              Expanded(
-                child: AspectRatio(
-                  aspectRatio: _chewieController!.aspectRatio ?? 16 / 9,
-                  child: Chewie(controller: _chewieController!),
-                ),
-              )
-            else if (_files.isNotEmpty)
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Available Files:',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: _files.length,
-                        itemBuilder: (context, index) {
-                          final file = _files[index];
-                          return ListTile(
-                            leading: Icon(file.icon),
-                            title: Text(file.name),
-                            subtitle: Text(file.formattedSize),
-                            selected: _selectedFile?.index == file.index,
-                            onTap: () => _selectFile(file),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
+            if (_isDownloading || _isStreaming)
+              Column(
+                children: [
+                  LinearProgressIndicator(value: _downloadProgress),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${(_downloadProgress * 100).toStringAsFixed(1)}%',
+                    textAlign: TextAlign.center,
+                  ),
+                ],
               ),
-            
-            if (_selectedFile != null && _chewieController == null) ...[
-              const SizedBox(height: 16),
-              if (_downloadComplete) 
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.play_arrow),
-                  label: Text('Play ${_selectedFile!.name}'),
-                  onPressed: _playLocalFile,
-                )
-              else
-                ElevatedButton.icon(
-                  icon: const Icon(Icons.download),
-                  label: Text(_isDownloading ? 'Downloading...' : 'Download ${_selectedFile!.name}'),
-                  onPressed: _isDownloading ? null : _downloadSelectedFile,
+            const SizedBox(height: 16),
+            Expanded(
+              child: _filesList.isNotEmpty
+                  ? ListView.builder(
+                      itemCount: _filesList.length,
+                      itemBuilder: (context, index) {
+                        final file = _filesList[index];
+                        final isVideo = file['mimeType']?.toString()?.startsWith('video/') ?? false;
+                        
+                        return Card(
+                          child: ListTile(
+                            title: Text(file['name'] ?? 'Unknown'),
+                            subtitle: Text('Size: ${_formatSize(file['size'] ?? 0)}'),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // Download button
+                                IconButton(
+                                  icon: const Icon(Icons.download),
+                                  onPressed: _isDownloading || _isStreaming 
+                                      ? null 
+                                      : () => _selectFileToDownload(index),
+                                  tooltip: 'Download',
+                                ),
+                                // Stream button (only for video files)
+                                if (isVideo)
+                                  IconButton(
+                                    icon: const Icon(Icons.play_circle),
+                                    onPressed: _isDownloading || _isStreaming 
+                                        ? null 
+                                        : () => _selectFileToStream(index),
+                                    tooltip: 'Stream',
+                                  ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    )
+                  : const Center(
+                      child: Text('No files to display'),
+                    ),
+            ),
+            if (_chewieController != null)
+              Container(
+                height: 240,
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey),
                 ),
-            ],
+                child: Chewie(controller: _chewieController!),
+              ),
           ],
         ),
       ),
     );
+  }
+
+  String _formatSize(int bytes) {
+    const suffixes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = 0;
+    double size = bytes.toDouble();
+    
+    while (size >= 1024 && i < suffixes.length - 1) {
+      size /= 1024;
+      i++;
+    }
+    
+    return '${size.toStringAsFixed(2)} ${suffixes[i]}';
   }
 }

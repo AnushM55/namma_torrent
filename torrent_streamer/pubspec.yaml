@@ -43,6 +43,7 @@ dependencies:
   path: ^1.9.0
   shared_preferences: ^2.2.0
   file_picker: ^5.3.1
+  device_info_plus: ^9.0.2
 
 dev_dependencies:
   flutter_test:

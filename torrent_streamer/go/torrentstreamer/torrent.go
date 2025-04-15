@@ -6,8 +6,12 @@ package main
 */
 import "C"
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,6 +28,8 @@ var (
 	clientLock  sync.Mutex
 	torrents    = make(map[string]*torrent.Torrent)
 	downloadDir string
+	httpServer  *http.Server
+	serverPort  int
 )
 
 type TorrentFile struct {
@@ -32,6 +38,105 @@ type TorrentFile struct {
 	Size     int64  `json:"size"`
 	Index    int    `json:"index"`
 	MimeType string `json:"mimeType"`
+}
+
+// Find an available port for the HTTP server
+func findAvailablePort(startPort int) (int, error) {
+	for port := startPort; port < startPort+100; port++ {
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			listener.Close()
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("no available ports found")
+}
+
+// Stream handler function
+func streamHandler(w http.ResponseWriter, r *http.Request) {
+	// Extract hash and fileIndex from request
+	hash := r.URL.Query().Get("hash")
+	fileIndexStr := r.URL.Query().Get("file")
+
+	if hash == "" || fileIndexStr == "" {
+		http.Error(w, "Missing hash or file parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Lock access to torrents map
+	clientLock.Lock()
+	t, exists := torrents[hash]
+	clientLock.Unlock()
+
+	if !exists {
+		http.Error(w, "Torrent not found", http.StatusNotFound)
+		return
+	}
+
+	fileIndex, err := strconv.Atoi(fileIndexStr)
+	if err != nil {
+		http.Error(w, "Invalid file index", http.StatusBadRequest)
+		return
+	}
+
+	files := t.Files()
+	if fileIndex < 0 || fileIndex >= len(files) {
+		http.Error(w, fmt.Sprintf("File index out of range (0-%d)", len(files)-1), http.StatusBadRequest)
+		return
+	}
+
+	file := files[fileIndex]
+
+	// Set content type based on file extension
+	contentType := getMimeType(file.DisplayPath())
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", file.Length()))
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	// Parse range header for seeking support
+	var start, end int64
+	rangeHeader := r.Header.Get("Range")
+	if rangeHeader != "" {
+		if strings.HasPrefix(rangeHeader, "bytes=") {
+			rangeStr := rangeHeader[6:]
+			rangeParts := strings.Split(rangeStr, "-")
+			if len(rangeParts) == 2 {
+				start, _ = strconv.ParseInt(rangeParts[0], 10, 64)
+				if rangeParts[1] != "" {
+					end, _ = strconv.ParseInt(rangeParts[1], 10, 64)
+				} else {
+					end = file.Length() - 1
+				}
+
+				if end >= file.Length() {
+					end = file.Length() - 1
+				}
+
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, file.Length()))
+				w.WriteHeader(http.StatusPartialContent)
+			}
+		}
+	} else {
+		end = file.Length() - 1
+	}
+
+	// Priority boost
+	file.SetPriority(torrent.PiecePriorityHigh)
+
+	// Create a reader for the file
+	reader := file.NewReader()
+	defer reader.Close()
+
+	// Seek to the start position if needed
+	if start > 0 {
+		reader.Seek(start, io.SeekStart)
+	}
+
+	// Stream the data
+	_, err = io.CopyN(w, reader, end-start+1)
+	if err != nil {
+		fmt.Printf("Error streaming file: %s\n", err.Error())
+	}
 }
 
 //export InitTorrentClient
@@ -49,6 +154,12 @@ func InitTorrentClient(cacheDir *C.char, customDownloadDir *C.char) *C.char {
 		client = nil
 	}
 
+	// Stop any existing HTTP server
+	if httpServer != nil {
+		httpServer.Close()
+		httpServer = nil
+	}
+
 	// Get the cache directory from the Flutter app
 	cacheDirGo := C.GoString(cacheDir)
 	if cacheDirGo == "" {
@@ -62,8 +173,8 @@ func InitTorrentClient(cacheDir *C.char, customDownloadDir *C.char) *C.char {
 		downloadDir = customDownloadDirGo
 		fmt.Printf("Using custom download directory: %s\n", downloadDir)
 	} else {
-		// Default to Download folder on external storage if available
-		downloadDir = "/storage/emulated/0/Download/TorrentStreamer"
+		// Default to Download folder on external storage
+		downloadDir = "/storage/emulated/0/Download"
 		if _, err := os.Stat(downloadDir); os.IsNotExist(err) {
 			// Fall back to app cache directory
 			downloadDir = filepath.Join(cacheDirGo, "torrentstreamer_downloads")
@@ -108,7 +219,32 @@ func InitTorrentClient(cacheDir *C.char, customDownloadDir *C.char) *C.char {
 		return C.CString(fmt.Sprintf("Error creating torrent client: %s", err.Error()))
 	}
 
-	return C.CString(fmt.Sprintf("Torrent client initialized successfully. Download directory: %s", downloadDir))
+	// Start HTTP server for streaming on a free port
+	serverPort, err = findAvailablePort(8080)
+	if err != nil {
+		return C.CString(fmt.Sprintf("Error finding available port: %s", err.Error()))
+	}
+
+	// Setup HTTP handlers
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream", streamHandler)
+
+	// Create HTTP server
+	httpServer = &http.Server{
+		Addr:    fmt.Sprintf("127.0.0.1:%d", serverPort),
+		Handler: mux,
+	}
+
+	// Start HTTP server in a goroutine
+	go func() {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("HTTP server error: %s\n", err.Error())
+		}
+	}()
+
+	fmt.Printf("HTTP server started on port %d\n", serverPort)
+
+	return C.CString(fmt.Sprintf("Torrent client initialized successfully. Download directory: %s, Streaming on port: %d", downloadDir, serverPort))
 }
 
 //export ShutdownTorrentClient
@@ -130,7 +266,20 @@ func ShutdownTorrentClient() *C.char {
 	client.Close()
 	client = nil
 
+	// Shutdown HTTP server if it exists
+	if httpServer != nil {
+		ctx, cancel := contextWithTimeout(5 * time.Second)
+		defer cancel()
+		httpServer.Shutdown(ctx)
+		httpServer = nil
+	}
+
 	return C.CString("Torrent client shut down successfully")
+}
+
+// Create a context with timeout for server shutdown
+func contextWithTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 //export AddTorrentAndGetInfoHash
@@ -142,25 +291,68 @@ func AddTorrentAndGetInfoHash(magnetURI *C.char) *C.char {
 		return C.CString("Error: Torrent client not initialized")
 	}
 
-	magnetURIGo := C.GoString(magnetURI)
+	inputURIGo := C.GoString(magnetURI)
+	fmt.Printf("Processing input: %s\n", inputURIGo)
 
-	// Add the torrent
-	t, err := client.AddMagnet(magnetURIGo)
+	var t *torrent.Torrent
+	var err error
+
+	// Check if it's a magnet URI or HTTP URL
+	if strings.HasPrefix(inputURIGo, "magnet:") {
+		// It's a magnet URI
+		t, err = client.AddMagnet(inputURIGo)
+	} else if strings.HasPrefix(inputURIGo, "http://") || strings.HasPrefix(inputURIGo, "https://") {
+		// It's an HTTP URL - we need to reject this with a better error message
+		return C.CString("Error: Direct HTTP/HTTPS torrent links are not supported. Please use a magnet link instead.")
+	} else {
+		// Unknown format
+		return C.CString("Error: Invalid input format. Please provide a valid magnet URI.")
+	}
+
 	if err != nil {
 		return C.CString(fmt.Sprintf("Error adding torrent: %s", err.Error()))
+	}
+
+	if t == nil {
+		return C.CString("Error: Failed to create torrent (nil torrent object)")
 	}
 
 	// Wait for info
 	select {
 	case <-t.GotInfo():
 		// Store the torrent
-		torrents[t.InfoHash().HexString()] = t
-		break
+		infoHash := t.InfoHash().HexString()
+		torrents[infoHash] = t
+		fmt.Printf("Successfully added torrent with hash: %s\n", infoHash)
+		return C.CString(infoHash)
 	case <-time.After(30 * time.Second):
 		return C.CString("Error: Timed out waiting for torrent info")
 	}
+}
 
-	return C.CString(t.InfoHash().HexString())
+//export GetStreamURL
+func GetStreamURL(infoHash *C.char, fileIndex *C.char) *C.char {
+	clientLock.Lock()
+	defer clientLock.Unlock()
+
+	if client == nil {
+		return C.CString("Error: Torrent client not initialized")
+	}
+
+	infoHashGo := C.GoString(infoHash)
+	fileIndexGo := C.GoString(fileIndex)
+
+	// Verify torrent exists
+	_, exists := torrents[infoHashGo]
+	if !exists {
+		return C.CString(fmt.Sprintf("Error: Torrent with hash %s not found", infoHashGo))
+	}
+
+	// Return the streaming URL
+	streamURL := fmt.Sprintf("http://127.0.0.1:%d/stream?hash=%s&file=%s",
+		serverPort, infoHashGo, fileIndexGo)
+
+	return C.CString(streamURL)
 }
 
 //export ListTorrentFiles
@@ -210,6 +402,11 @@ func DownloadTorrentFile(infoHash *C.char, fileIndex *C.char) *C.char {
 	fileIdx, err := strconv.Atoi(fileIndexGo)
 	if err != nil {
 		return C.CString(fmt.Sprintf("Error: Invalid file index: %s", err.Error()))
+	}
+
+	// Additional safety check for parsing "null"
+	if fileIndexGo == "null" || fileIndexGo == "" {
+		return C.CString("Error: Invalid file index: received empty or null value")
 	}
 
 	// Get the files list
@@ -368,6 +565,11 @@ func GetDownloadProgress(infoHash *C.char, fileIndex *C.char) *C.char {
 		return C.CString(fmt.Sprintf("Error: Invalid file index: %s", err.Error()))
 	}
 
+	// Additional safety check for parsing "null"
+	if fileIndexGo == "null" || fileIndexGo == "" {
+		return C.CString("Error: Invalid file index: received empty or null value")
+	}
+
 	// Get the files list
 	files := t.Files()
 
@@ -416,14 +618,32 @@ func FreeString(str *C.char) {
 // Helper function to get list of files from a torrent
 func getFilesList(t *torrent.Torrent) []TorrentFile {
 	var files []TorrentFile
+	filesList := t.Files()
 
-	for i, file := range t.Files() {
+	// If no files found, return empty list
+	if len(filesList) == 0 {
+		fmt.Printf("Warning: No files found in torrent %s\n", t.InfoHash().HexString())
+		return files
+	}
+
+	for i, file := range filesList {
+		// Skip any invalid files
+		if file == nil {
+			fmt.Printf("Warning: Nil file at index %d\n", i)
+			continue
+		}
+
+		displayPath := file.DisplayPath()
+		if displayPath == "" {
+			displayPath = fmt.Sprintf("Unknown_File_%d", i)
+		}
+
 		files = append(files, TorrentFile{
-			Name:     filepath.Base(file.DisplayPath()),
-			Path:     file.DisplayPath(),
+			Name:     filepath.Base(displayPath),
+			Path:     displayPath,
 			Size:     file.Length(),
 			Index:    i,
-			MimeType: getMimeType(file.DisplayPath()),
+			MimeType: getMimeType(displayPath),
 		})
 	}
 

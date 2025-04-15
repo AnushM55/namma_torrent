@@ -83,6 +83,7 @@ extern "C" {
 extern char* InitTorrentClient(char* cacheDir, char* customDownloadDir);
 extern char* ShutdownTorrentClient();
 extern char* AddTorrentAndGetInfoHash(char* magnetURI);
+extern char* GetStreamURL(char* infoHash, char* fileIndex);
 extern char* ListTorrentFiles(char* infoHash);
 extern char* DownloadTorrentFile(char* infoHash, char* fileIndex);
 extern char* GetDownloadProgress(char* infoHash, char* fileIndex);
