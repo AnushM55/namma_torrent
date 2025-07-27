@@ -45,7 +45,7 @@ class TorrentFFI {
 
   static Future<String> initialize({String? customDownloadDir}) async {
     try {
-      final appDir = await getApplicationDocumentsDirectory();
+      // final appDir = await getApplicationDocumentsDirectory(); // Unused variable
       final cachePath = (await getTemporaryDirectory()).path;
 
       // Load the shared library

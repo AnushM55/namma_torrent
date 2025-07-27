@@ -5,10 +5,6 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chewie/chewie.dart';
-import 'package:path/path.dart' as path;
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'torrent_ffi.dart';
 
@@ -88,10 +84,10 @@ class HomePage extends StatefulWidget {
   const HomePage({Key? key}) : super(key: key);
 
   @override
-  _HomePageState createState() => _HomePageState();
+  HomePageState createState() => HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class HomePageState extends State<HomePage> {
   final TextEditingController _magnetController = TextEditingController();
   String _statusMessage = "Enter a magnet link to begin";
   String? _torrentHash;
@@ -137,7 +133,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _requestPermissions() async {
     final deviceInfo = DeviceInfoPlugin();
     if (await Permission.storage.request().isGranted) {
-      print("Storage permission granted");
+      // Storage permission granted
     }
 
     // For Android 13 and above, request media permissions
@@ -290,7 +286,7 @@ class _HomePageState extends State<HomePage> {
           _torrentHash!, _selectedFileIndex!);
       
       if (progressResult.startsWith("Error")) {
-        print("Error tracking progress: $progressResult");
+        // Error tracking progress: $progressResult
         return;
       }
 
@@ -316,7 +312,7 @@ class _HomePageState extends State<HomePage> {
           timer.cancel();
         }
       } catch (e) {
-        print("Error parsing progress: $e");
+        // Error parsing progress: $e
       }
     });
   }
@@ -329,7 +325,7 @@ class _HomePageState extends State<HomePage> {
     try {
       if (isStream) {
         // For streaming, use network source
-        _videoController = VideoPlayerController.network(source);
+        _videoController = VideoPlayerController.networkUrl(Uri.parse(source));
       } else {
         // For local file, use file source
         _videoController = VideoPlayerController.file(File(source));
@@ -409,7 +405,7 @@ class _HomePageState extends State<HomePage> {
                       itemCount: _filesList.length,
                       itemBuilder: (context, index) {
                         final file = _filesList[index];
-                        final isVideo = file['mimeType']?.toString()?.startsWith('video/') ?? false;
+                        final isVideo = file['mimeType'].toString().startsWith('video/');
                         
                         return Card(
                           child: ListTile(
