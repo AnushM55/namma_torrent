@@ -5,6 +5,7 @@ package main
 #include <string.h>
 */
 import "C"
+
 import (
 	"context"
 	"encoding/json"
@@ -211,7 +212,7 @@ func InitTorrentClient(cacheDir *C.char, customDownloadDir *C.char) *C.char {
 	config.DisableUTP = true  // Disable UDP (more compatible with restricted networks)
 	config.NoDHT = false
 	config.NoUpload = false
-	config.Seed = false
+	config.Seed = true
 
 	// Create the torrent client
 	client, err = torrent.NewClient(config)
