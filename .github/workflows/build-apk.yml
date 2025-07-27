@@ -35,8 +35,12 @@ jobs:
       - name: Build Unsigned Release APK
         run: flutter build apk --release
 
-      - name: Release APK
-        uses: softprops/action-gh-release@v1
+      - name: Update Release with Artifact
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: build-${{ github.run_number }}
-          files: torrent_streamer/build/app/outputs/flutter-apk/app-release.apk 
+          # This allows the action to find the release that triggered the workflow
+          allowUpdates: true 
+          # The artifact to upload
+          artifacts: "build/app/outputs/flutter-apk/app-release.apk"
+          # Your GitHub token
+          token: ${{ secrets.GITHUB_TOKEN }}
